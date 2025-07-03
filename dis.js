@@ -1,6 +1,6 @@
 require("dotenv").config();
 const { Client, GatewayIntentBits } = require("discord.js");
-const playdl = require("play-dl");
+const ytdl = require("ytdl-core");
 const {
     joinVoiceChannel,
     createAudioPlayer,
@@ -154,29 +154,23 @@ client.on("messageCreate", async (msg) => {
 
     if (msg.content.toLowerCase().startsWith("kakuli")) {
         const args = msg.content.trim().split(" ");
-        let url = args[1];
+        const url = args[1];
 
-        if (!url || !url.startsWith("http")) {
+        if (!url || !ytdl.validateURL(url)) {
             return msg.reply("❌ Please provide a valid YouTube link.");
         }
-
-        url = url.split("?")[0]; // Clean URL (optional)
 
         const channel = msg.member?.voice?.channel;
         if (!channel) return msg.reply("❌ You must be in a voice channel to play music.");
 
         try {
-            const videoInfo = await playdl.video_info(url);
+            // Create a readable stream from YouTube video (audio only)
+            const stream = ytdl(url, { filter: "audioonly", quality: "highestaudio" });
 
-            console.log("Video title:", videoInfo.video_details.title);
+            // Create audio resource from stream
+            const resource = createAudioResource(stream);
 
-            // Use the correct URL for streaming
-            const stream = await playdl.stream(videoInfo.url);
-
-            const resource = createAudioResource(stream.stream, {
-                inputType: stream.type,
-            });
-
+            // Join voice channel
             const connection = joinVoiceChannel({
                 channelId: channel.id,
                 guildId: channel.guild.id,
@@ -194,13 +188,12 @@ client.on("messageCreate", async (msg) => {
                 if (connection.state.status !== VoiceConnectionStatus.Destroyed) connection.destroy();
             });
 
-            msg.channel.send(`▶️ Now playing: ${videoInfo.video_details.title}`);
+            msg.channel.send(`▶️ Now playing: ${url}`);
         } catch (err) {
             console.error("❌ Error playing music:", err);
-            msg.reply("❌ Failed to play the video. Please check the URL and try again.");
+            msg.reply("❌ Failed to play the video. Please try again.");
         }
     }
-
 
 });
 
