@@ -5,6 +5,7 @@
     "discord.js": "^14.21.0",
     "dotenv": "^17.0.1",
     "ffmpeg-static": "^5.2.0",
-    "quick.db": "^9.1.7"
+    "quick.db": "^9.1.7",
+    "ytdl-core": "^4.11.5"
   }
 }
