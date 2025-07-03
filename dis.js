@@ -12,12 +12,18 @@ const { QuickDB } = require("quick.db");
 const db = new QuickDB();
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildVoiceStates,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+  ],
 });
 
 const YOUR_USER_ID = process.env.OWNER_ID;
 const VOICE_LOG_CHANNEL_ID = process.env.VOICE_LOG_CHANNEL_ID;
-const voiceJoinMap = new Map();
+
+const voiceJoinMap = new Map(); // Tracks users currently in voice + join timestamp
 
 // 🔊 Play join/leave sound for owner only
 function playSound(channel, fileName) {
@@ -76,21 +82,37 @@ function playSound(channel, fileName) {
   });
 }
 
-// ⌛ Store time in DB
-async function addVoiceTime(userId, seconds) {
-  const today = new Date().toISOString().split("T")[0];
-  const key = `voiceTime_${userId}_${today}`;
+// ⌛ Store time in DB (seconds added for user on day)
+async function addVoiceTime(userId, seconds, day) {
+  const dateKey = day || new Date().toISOString().split("T")[0];
+  const key = `voiceTime_${userId}_${dateKey}`;
   const current = (await db.get(key)) || 0;
   await db.set(key, current + seconds);
 }
 
-// 🎧 Track join/leave/move of all users
+// Get voice time for a user for a specific day
+async function getVoiceTime(userId, day) {
+  const dateKey = day || new Date().toISOString().split("T")[0];
+  const key = `voiceTime_${userId}_${dateKey}`;
+  return (await db.get(key)) || 0;
+}
+
+// Get previous day string "YYYY-MM-DD"
+function getPreviousDayDateString() {
+  const today = new Date();
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+  return yesterday.toISOString().slice(0, 10);
+}
+
+// 🎧 Track join/leave/move of all users except the owner (owner handled separately for sounds)
 client.on("voiceStateUpdate", async (oldState, newState) => {
   const userId = newState.id;
   const oldChannel = oldState.channel;
   const newChannel = newState.channel;
+  const now = Date.now();
 
-  // For OWNER sound playback
+  // Play sounds only for OWNER_ID
   if (userId === YOUR_USER_ID) {
     if (!oldChannel && newChannel) {
       console.log(`🔊 Joined VC: ${newChannel.name}`);
@@ -105,11 +127,11 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
     return;
   }
 
-  const now = Date.now();
-
   if (!oldChannel && newChannel) {
+    // User joined VC
     voiceJoinMap.set(userId, now);
   } else if (oldChannel && !newChannel) {
+    // User left VC
     if (voiceJoinMap.has(userId)) {
       const joinTime = voiceJoinMap.get(userId);
       const timeSpent = Math.floor((now - joinTime) / 1000);
@@ -117,6 +139,7 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
       voiceJoinMap.delete(userId);
     }
   } else if (oldChannel && newChannel && oldChannel.id !== newChannel.id) {
+    // User moved VC
     if (voiceJoinMap.has(userId)) {
       const joinTime = voiceJoinMap.get(userId);
       const timeSpent = Math.floor((now - joinTime) / 1000);
@@ -126,30 +149,62 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
   }
 });
 
-// 📊 Manual command to check voice time
+// 📊 Command: !voicetime [optional: date or "yesterday"]
 client.on("messageCreate", async (msg) => {
-  if (msg.content === "!voicetime") {
-    const today = new Date().toISOString().split("T")[0];
-    const data = await db.all();
+  if (!msg.content.toLowerCase().startsWith("!voicetime")) return;
 
-    const lines = data
-      .filter((item) => item.id.includes(`_${today}`))
-      .map((item) => {
-        const userId = item.id.split("_")[1];
-        const timeSec = item.value;
-        const minutes = Math.floor(timeSec / 60);
-        return `<@${userId}> — **${minutes}** minute${minutes !== 1 ? "s" : ""}`;
-      });
-
-    const finalMessage = lines.length
-      ? `📊 **Voice Time Today**:\n\n${lines.join("\n")}`
-      : "📭 No voice activity recorded today.";
-
-    msg.channel.send(finalMessage);
+  let parts = msg.content.trim().split(/\s+/);
+  let dateArg = null;
+  if (parts.length > 1) {
+    dateArg = parts[1].toLowerCase();
   }
+
+  let day;
+  if (!dateArg || dateArg === "today") {
+    day = new Date().toISOString().split("T")[0];
+  } else if (dateArg === "yesterday") {
+    day = getPreviousDayDateString();
+  } else {
+    // Validate date format YYYY-MM-DD roughly
+    if (/^\d{4}-\d{2}-\d{2}$/.test(dateArg)) {
+      day = dateArg;
+    } else {
+      msg.channel.send("❌ Invalid date format. Use YYYY-MM-DD or 'yesterday'.");
+      return;
+    }
+  }
+
+  // Before showing results, update voice time for all users currently connected in voice channels:
+  const now = Date.now();
+  for (const [userId, joinTime] of voiceJoinMap.entries()) {
+    const timeSpent = Math.floor((now - joinTime) / 1000);
+    await addVoiceTime(userId, timeSpent);
+    voiceJoinMap.set(userId, now);
+  }
+
+  // Fetch all stored voice times for that day
+  const allData = await db.all();
+  const filtered = allData.filter((item) => item.id.endsWith(`_${day}`));
+  if (filtered.length === 0) {
+    msg.channel.send(`📭 No voice activity recorded for **${day}**.`);
+    return;
+  }
+
+  // Format result message
+  const lines = filtered.map((item) => {
+    const userId = item.id.split("_")[1];
+    const timeSec = item.value;
+    const h = Math.floor(timeSec / 3600);
+    const m = Math.floor((timeSec % 3600) / 60);
+    const s = timeSec % 60;
+    return `<@${userId}> — **${h}h ${m}m ${s}s**`;
+  });
+
+  const finalMessage = `📊 **Voice Time for ${day}**:\n\n${lines.join("\n")}`;
+  msg.channel.send(finalMessage);
 });
 
-// 🔄 Auto-update and report every 30 minutes
+// 🔄 Auto-update and report every 30 minutes to the VOICE_LOG_CHANNEL_ID
 client.once("ready", () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 
@@ -157,25 +212,28 @@ client.once("ready", () => {
     const now = Date.now();
     const today = new Date().toISOString().split("T")[0];
 
+    // Update voice time for currently connected users
     for (const [userId, joinTime] of voiceJoinMap.entries()) {
       const timeSpent = Math.floor((now - joinTime) / 1000);
       await addVoiceTime(userId, timeSpent);
       voiceJoinMap.set(userId, now);
     }
 
-    const data = await db.all();
-    const lines = data
-      .filter((item) => item.id.includes(`_${today}`))
-      .map((item) => {
-        const userId = item.id.split("_")[1];
-        const timeSec = item.value;
-        const minutes = Math.floor(timeSec / 60);
-        return `<@${userId}> — **${minutes}** minute${minutes !== 1 ? "s" : ""}`;
-      });
+    // Prepare report message
+    const allData = await db.all();
+    const filtered = allData.filter((item) => item.id.endsWith(`_${today}`));
+    if (filtered.length === 0) return;
 
-    const finalMessage = lines.length
-      ? `⏱️ **[Auto Report] Voice Time So Far Today**:\n\n${lines.join("\n")}`
-      : "📭 No voice activity recorded yet today.";
+    const lines = filtered.map((item) => {
+      const userId = item.id.split("_")[1];
+      const timeSec = item.value;
+      const h = Math.floor(timeSec / 3600);
+      const m = Math.floor((timeSec % 3600) / 60);
+      const s = timeSec % 60;
+      return `<@${userId}> — **${h}h ${m}m ${s}s**`;
+    });
+
+    const finalMessage = `⏱️ **[Auto Report] Voice Time So Far Today**:\n\n${lines.join("\n")}`;
 
     try {
       const logChannel = await client.channels.fetch(VOICE_LOG_CHANNEL_ID);
@@ -185,7 +243,7 @@ client.once("ready", () => {
     } catch (err) {
       console.error("❌ Failed to send auto voice report:", err);
     }
-  }, 1000 * 60 * 30); // Every 30 mins
+  }, 30 * 60 * 1000); // every 30 minutes
 });
 
 client.login(process.env.DISCORD_TOKEN);
