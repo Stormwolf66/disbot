@@ -27,6 +27,7 @@ const SPAM_LIMIT = 5;
 const SPAM_TIME = 10 * 1000;
 const TIMEOUT_DURATION = 60 * 1000;
 
+// Load commands
 client.commands = new Map();
 const commandFiles = fs
   .readdirSync(path.join(__dirname, "commands"))
@@ -36,65 +37,7 @@ for (const file of commandFiles) {
   client.commands.set(command.name, command);
 }
 
-async function getJoinSound() {
-  return (await db.get("joinSound")) || "join.mp3";
-}
-async function getLeaveSound() {
-  return (await db.get("leaveSound")) || "leave.mp3";
-}
-
-async function playSound(channel, type) {
-  let connection;
-  try {
-    connection = joinVoiceChannel({
-      channelId: channel.id,
-      guildId: channel.guild.id,
-      adapterCreator: channel.guild.voiceAdapterCreator,
-    });
-  } catch (err) {
-    console.error(`❌ Failed to join VC '${channel.name}': ${err.message}`);
-    return;
-  }
-
-  const player = createAudioPlayer();
-  let fileName = type === "join" ? await getJoinSound() : await getLeaveSound();
-  const fullPath = path.join(__dirname, "sounds", fileName);
-  if (!fs.existsSync(fullPath)) {
-    console.warn(`⚠️ Sound file '${fileName}' does not exist! Using default.`);
-    fileName = type === "join" ? "join.mp3" : "leave.mp3";
-  }
-
-  const resource = createAudioResource(path.join(__dirname, "sounds", fileName));
-  try {
-    connection.subscribe(player);
-    player.play(resource);
-  } catch (err) {
-    console.error("❌ Failed to play audio:", err);
-    connection.destroy();
-    return;
-  }
-
-  const timeout = setTimeout(() => connection.destroy(), 15000);
-  player.on(AudioPlayerStatus.Idle, () => {
-    connection.destroy();
-    clearTimeout(timeout);
-  });
-
-  connection.on("stateChange", (_, newState) => {
-    if (newState.status === VoiceConnectionStatus.Disconnected) {
-      connection.destroy();
-      clearTimeout(timeout);
-    }
-  });
-}
-
-async function addVoiceTime(userId, guildId, seconds, day) {
-  const dateKey = day || new Date().toISOString().split("T")[0];
-  const key = `voiceTime_${guildId}_${userId}_${dateKey}`;
-  const current = (await db.get(key)) || 0;
-  await db.set(key, current + seconds);
-}
-
+// Voice join tracking
 client.on("voiceStateUpdate", async (oldState, newState) => {
   const userId = newState.id;
   const guildId = newState.guild.id;
@@ -108,19 +51,25 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
   } else if (oldChannel && !newChannel) {
     if (voiceJoinMap.has(key)) {
       const joinTime = voiceJoinMap.get(key);
-      await addVoiceTime(userId, guildId, Math.floor((now - joinTime) / 1000));
+      const timeSpent = Math.floor((now - joinTime) / 1000);
+      const dateKey = new Date().toISOString().split("T")[0];
+      const dbKey = `voiceTime_${guildId}_${userId}_${dateKey}`;
+      await db.set(dbKey, ((await db.get(dbKey)) || 0) + timeSpent);
       voiceJoinMap.delete(key);
     }
   } else if (oldChannel && newChannel && oldChannel.id !== newChannel.id) {
     if (voiceJoinMap.has(key)) {
       const joinTime = voiceJoinMap.get(key);
-      await addVoiceTime(userId, guildId, Math.floor((now - joinTime) / 1000));
+      const timeSpent = Math.floor((now - joinTime) / 1000);
+      const dateKey = new Date().toISOString().split("T")[0];
+      const dbKey = `voiceTime_${guildId}_${userId}_${dateKey}`;
+      await db.set(dbKey, ((await db.get(dbKey)) || 0) + timeSpent);
     }
     voiceJoinMap.set(key, now);
   }
 });
 
-// ✅ Combined messageCreate for spam protection AND command handling
+// Single messageCreate for both spam and commands
 client.on("messageCreate", async (message) => {
   if (message.author.bot || !message.guild) return;
 
@@ -128,7 +77,7 @@ client.on("messageCreate", async (message) => {
   const content = message.content.trim();
   const now = Date.now();
 
-  // Spam protection
+  // Spam filter
   let userData = spamMap.get(userId) || [];
   userData = userData.filter((m) => now - m.timestamp < SPAM_TIME);
   userData.push({ content, id: message.id, timestamp: now });
@@ -141,22 +90,18 @@ client.on("messageCreate", async (message) => {
         const msgToDelete = await message.channel.messages.fetch(msgInfo.id).catch(() => null);
         if (msgToDelete) await msgToDelete.delete().catch(() => null);
       }
-
       await message.channel.send(`<@${userId}>, stop spamming. You are being timed out.`);
 
       const member = await message.guild.members.fetch(userId);
       const botMember = message.guild.members.me;
       if (botMember.permissions.has(PermissionsBitField.Flags.ModerateMembers)) {
         await member.timeout(TIMEOUT_DURATION, "Repeated message spam");
-        console.log(`✅ Timed out: ${member.user.tag}`);
-      } else {
-        console.warn("⚠️ Missing 'ModerateMembers' permission.");
       }
     } catch (err) {
       console.error("❌ Timeout failed:", err);
     }
     spamMap.delete(userId);
-    return; // Prevent command execution if timed out
+    return;
   }
 
   // Command handling
@@ -183,7 +128,8 @@ client.once("ready", () => {
 
     for (const [key, joinTime] of voiceJoinMap.entries()) {
       const [guildId, userId] = key.split("_");
-      await addVoiceTime(userId, guildId, Math.floor((now - joinTime) / 1000));
+      const dbKey = `voiceTime_${guildId}_${userId}_${today}`;
+      await db.set(dbKey, ((await db.get(dbKey)) || 0) + Math.floor((now - joinTime) / 1000));
       voiceJoinMap.set(key, now);
     }
 
@@ -219,7 +165,7 @@ client.once("ready", () => {
         console.error(`❌ Failed to send auto report in guild ${guildId}:`, err);
       }
     }
-  }, 30 * 60 * 1000); // 30 min
+  }, 30 * 60 * 1000);
 });
 
 client.login(process.env.DISCORD_TOKEN);

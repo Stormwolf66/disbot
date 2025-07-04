@@ -2,10 +2,10 @@ module.exports = {
   name: "voicetime",
   async execute(msg, args, db, voiceJoinMap) {
     const guildId = msg.guild.id;
-
     const botMember = msg.guild.members.me;
     const member = msg.member;
 
+    // Set channel logic
     if (args[0] === "channel") {
       if (member.roles.highest.position <= botMember.roles.highest.position) {
         return msg.channel.send("❌ You must have a higher role than the bot to set the voice log channel.");
@@ -21,6 +21,7 @@ module.exports = {
       return msg.channel.send(`✅ Voice log channel set to <#${channelId}>.`);
     }
 
+    // Date parsing
     const dateArg = args[0]?.toLowerCase();
     const today = new Date();
     const day =
@@ -34,17 +35,17 @@ module.exports = {
 
     if (!day) return msg.channel.send("❌ Invalid date format.");
 
+    // Update in-memory active voice users
     const now = Date.now();
     for (const [key, joinTime] of voiceJoinMap.entries()) {
       if (!key.startsWith(guildId)) continue;
       const [, userId] = key.split("_");
-      await db.set(
-        `voiceTime_${guildId}_${userId}_${day}`,
-        ((await db.get(`voiceTime_${guildId}_${userId}_${day}`)) || 0) + Math.floor((now - joinTime) / 1000)
-      );
+      const dbKey = `voiceTime_${guildId}_${userId}_${day}`;
+      await db.set(dbKey, ((await db.get(dbKey)) || 0) + Math.floor((now - joinTime) / 1000));
       voiceJoinMap.set(key, now);
     }
 
+    // Get all users for that day
     const allData = await db.all();
     const filtered = allData.filter(
       (item) => item.id.startsWith(`voiceTime_${guildId}_`) && item.id.endsWith(`_${day}`)
