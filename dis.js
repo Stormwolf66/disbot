@@ -27,6 +27,9 @@ const SPAM_LIMIT = 5;
 const SPAM_TIME = 10 * 1000;
 const TIMEOUT_DURATION = 60 * 1000;
 
+// Deduplication cache for message IDs to avoid double handling
+const recentMessages = new Set();
+
 // Load commands
 client.commands = new Map();
 const commandFiles = fs
@@ -71,6 +74,11 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
 
 // Single messageCreate for both spam and commands
 client.on("messageCreate", async (message) => {
+  // Deduplicate same message event
+  if (recentMessages.has(message.id)) return;
+  recentMessages.add(message.id);
+  setTimeout(() => recentMessages.delete(message.id), 5000);
+
   if (message.author.bot || !message.guild) return;
 
   const userId = message.author.id;
