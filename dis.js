@@ -75,7 +75,6 @@ async function playSound(channel, type) {
   }
 
   const timeout = setTimeout(() => connection.destroy(), 15000);
-
   player.on(AudioPlayerStatus.Idle, () => {
     connection.destroy();
     clearTimeout(timeout);
@@ -102,7 +101,6 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
   const oldChannel = oldState.channel;
   const newChannel = newState.channel;
   const now = Date.now();
-
   const key = `${guildId}_${userId}`;
 
   if (!oldChannel && newChannel) {
@@ -122,6 +120,7 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
   }
 });
 
+// ✅ Combined messageCreate for spam protection AND command handling
 client.on("messageCreate", async (message) => {
   if (message.author.bot || !message.guild) return;
 
@@ -129,6 +128,7 @@ client.on("messageCreate", async (message) => {
   const content = message.content.trim();
   const now = Date.now();
 
+  // Spam protection
   let userData = spamMap.get(userId) || [];
   userData = userData.filter((m) => now - m.timestamp < SPAM_TIME);
   userData.push({ content, id: message.id, timestamp: now });
@@ -156,6 +156,21 @@ client.on("messageCreate", async (message) => {
       console.error("❌ Timeout failed:", err);
     }
     spamMap.delete(userId);
+    return; // Prevent command execution if timed out
+  }
+
+  // Command handling
+  if (!message.content.startsWith("!")) return;
+  const args = message.content.slice(1).trim().split(/ +/);
+  const commandName = args.shift().toLowerCase();
+  const command = client.commands.get(commandName);
+  if (!command) return;
+
+  try {
+    await command.execute(message, args, db, voiceJoinMap);
+  } catch (err) {
+    console.error(err);
+    message.reply("❌ Error executing command.");
   }
 });
 
@@ -204,22 +219,7 @@ client.once("ready", () => {
         console.error(`❌ Failed to send auto report in guild ${guildId}:`, err);
       }
     }
-  }, 30 * 60 * 1000);
-});
-
-client.on("messageCreate", async (message) => {
-  if (!message.content.startsWith("!") || message.author.bot) return;
-  const args = message.content.slice(1).trim().split(/ +/);
-  const commandName = args.shift().toLowerCase();
-  const command = client.commands.get(commandName);
-  if (!command) return;
-
-  try {
-    await command.execute(message, args, db, voiceJoinMap);
-  } catch (err) {
-    console.error(err);
-    message.reply("❌ Error executing command.");
-  }
+  }, 30 * 60 * 1000); // 30 min
 });
 
 client.login(process.env.DISCORD_TOKEN);
