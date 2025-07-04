@@ -23,14 +23,12 @@ const client = new Client({
 
 const voiceJoinMap = new Map();
 const spamMap = new Map();
+const recentMessages = new Set();
 const SPAM_LIMIT = 5;
 const SPAM_TIME = 10 * 1000;
 const TIMEOUT_DURATION = 60 * 1000;
+const OWNER_ID = process.env.OWNER_ID;
 
-// Deduplication cache for message IDs to avoid double handling
-const recentMessages = new Set();
-
-// Load commands
 client.commands = new Map();
 const commandFiles = fs
   .readdirSync(path.join(__dirname, "commands"))
@@ -40,7 +38,68 @@ for (const file of commandFiles) {
   client.commands.set(command.name, command);
 }
 
-// Voice join tracking
+// 🔊 Function to play sound
+function playSound(channel, fileName) {
+  let connection;
+
+  try {
+    connection = joinVoiceChannel({
+      channelId: channel.id,
+      guildId: channel.guild.id,
+      adapterCreator: channel.guild.voiceAdapterCreator,
+    });
+  } catch (err) {
+    console.error(`❌ Failed to join VC '${channel.name}': ${err.message}`);
+    return;
+  }
+
+  const filePath = path.join(__dirname, "sounds", fileName);
+  if (!fs.existsSync(filePath)) {
+    console.error(`❌ Sound file missing: ${filePath}`);
+    return;
+  }
+
+  const player = createAudioPlayer();
+  const resource = createAudioResource(filePath);
+
+  try {
+    connection.subscribe(player);
+    player.play(resource);
+  } catch (err) {
+    console.error("❌ Failed to play audio:", err);
+    if (connection.state.status !== VoiceConnectionStatus.Destroyed) connection.destroy();
+    return;
+  }
+
+  const timeout = setTimeout(() => {
+    if (connection.state.status !== VoiceConnectionStatus.Destroyed) {
+      connection.destroy();
+      console.log("⏱️ Timeout: Forced disconnect.");
+    }
+  }, 15000);
+
+  player.on(AudioPlayerStatus.Idle, () => {
+    if (connection.state.status !== VoiceConnectionStatus.Destroyed) {
+      connection.destroy();
+      clearTimeout(timeout);
+    }
+  });
+
+  connection.on("stateChange", (oldState, newState) => {
+    if (
+      oldState.status !== VoiceConnectionStatus.Destroyed &&
+      newState.status === VoiceConnectionStatus.Disconnected
+    ) {
+      if (connection.state.status !== VoiceConnectionStatus.Destroyed) {
+        connection.destroy();
+        clearTimeout(timeout);
+        console.log("⚠️ Bot manually disconnected.");
+      }
+    }
+  });
+}
+
+// 📞 Voice State Tracking
 client.on("voiceStateUpdate", async (oldState, newState) => {
   const userId = newState.id;
   const guildId = newState.guild.id;
@@ -49,6 +108,14 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
   const now = Date.now();
   const key = `${guildId}_${userId}`;
 
+  // 🔊 Play sound if it's the OWNER
+  if (userId === OWNER_ID) {
+    if (!oldChannel && newChannel) playSound(newChannel, "join.mp3");
+    else if (oldChannel && !newChannel) playSound(oldChannel, "leave.mp3");
+    else if (oldChannel && newChannel && oldChannel.id !== newChannel.id) playSound(newChannel, "join.mp3");
+  }
+
+  // 📊 Voice time tracking for everyone
   if (!oldChannel && newChannel) {
     voiceJoinMap.set(key, now);
   } else if (oldChannel && !newChannel) {
@@ -72,9 +139,8 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
   }
 });
 
-// Single messageCreate for both spam and commands
+// 💬 Message Handling
 client.on("messageCreate", async (message) => {
-  // Deduplicate same message event
   if (recentMessages.has(message.id)) return;
   recentMessages.add(message.id);
   setTimeout(() => recentMessages.delete(message.id), 5000);
@@ -85,7 +151,7 @@ client.on("messageCreate", async (message) => {
   const content = message.content.trim();
   const now = Date.now();
 
-  // Spam filter
+  // Anti-spam
   let userData = spamMap.get(userId) || [];
   userData = userData.filter((m) => now - m.timestamp < SPAM_TIME);
   userData.push({ content, id: message.id, timestamp: now });
@@ -112,7 +178,7 @@ client.on("messageCreate", async (message) => {
     return;
   }
 
-  // Command handling
+  // Command handler
   if (!message.content.startsWith("!")) return;
   const args = message.content.slice(1).trim().split(/ +/);
   const commandName = args.shift().toLowerCase();
@@ -127,6 +193,7 @@ client.on("messageCreate", async (message) => {
   }
 });
 
+// 📅 Auto Report
 client.once("ready", () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 
