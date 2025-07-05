@@ -21,14 +21,15 @@ const client = new Client({
   ],
 });
 
+const OWNER_ID = process.env.OWNER_ID;
 const voiceJoinMap = new Map();
 const spamMap = new Map();
 const recentMessages = new Set();
 const SPAM_LIMIT = 5;
 const SPAM_TIME = 10 * 1000;
 const TIMEOUT_DURATION = 60 * 1000;
-const OWNER_ID = process.env.OWNER_ID;
 
+// Load commands
 client.commands = new Map();
 const commandFiles = fs
   .readdirSync(path.join(__dirname, "commands"))
@@ -38,43 +39,25 @@ for (const file of commandFiles) {
   client.commands.set(command.name, command);
 }
 
-// 🔊 Function to play sound
+// 🔊 Play join/leave sound for owner only
 function playSound(channel, fileName) {
-  let connection;
-
-  try {
-    connection = joinVoiceChannel({
-      channelId: channel.id,
-      guildId: channel.guild.id,
-      adapterCreator: channel.guild.voiceAdapterCreator,
-    });
-  } catch (err) {
-    console.error(`❌ Failed to join VC '${channel.name}': ${err.message}`);
-    return;
-  }
-
   const filePath = path.join(__dirname, "sounds", fileName);
-  if (!fs.existsSync(filePath)) {
-    console.error(`❌ Sound file missing: ${filePath}`);
-    return;
-  }
+  if (!fs.existsSync(filePath)) return;
+
+  const connection = joinVoiceChannel({
+    channelId: channel.id,
+    guildId: channel.guild.id,
+    adapterCreator: channel.guild.voiceAdapterCreator,
+  });
 
   const player = createAudioPlayer();
   const resource = createAudioResource(filePath);
-
-  try {
-    connection.subscribe(player);
-    player.play(resource);
-  } catch (err) {
-    console.error("❌ Failed to play audio:", err);
-    if (connection.state.status !== VoiceConnectionStatus.Destroyed) connection.destroy();
-    return;
-  }
+  connection.subscribe(player);
+  player.play(resource);
 
   const timeout = setTimeout(() => {
     if (connection.state.status !== VoiceConnectionStatus.Destroyed) {
       connection.destroy();
-      console.log("⏱️ Timeout: Forced disconnect.");
     }
   }, 15000);
 
@@ -84,20 +67,21 @@ function playSound(channel, fileName) {
       clearTimeout(timeout);
     }
   });
-
-  connection.on("stateChange", (oldState, newState) => {
-    if (
-      oldState.status !== VoiceConnectionStatus.Destroyed &&
-      newState.status === VoiceConnectionStatus.Disconnected
-    ) {
-      if (connection.state.status !== VoiceConnectionStatus.Destroyed) {
-        connection.destroy();
-        clearTimeout(timeout);
-        console.log("⚠️ Bot manually disconnected.");
-      }
-    }
-  });
 }
+
+// 🔁 Weekly cleanup (for snipes)
+async function weeklyCleanup() {
+  const allKeys = await db.all();
+  const now = Date.now();
+  for (const item of allKeys) {
+    if (item.id.startsWith("snipe_")) {
+      const data = item.value;
+      const oneWeekOld = data.filter((entry) => now - entry.timestamp < 7 * 24 * 60 * 60 * 1000);
+      await db.set(item.id, oneWeekOld);
+    }
+  }
+}
+setInterval(weeklyCleanup, 7 * 24 * 60 * 60 * 1000); // once a week
 
 // 📞 Voice State Tracking
 client.on("voiceStateUpdate", async (oldState, newState) => {
@@ -108,14 +92,14 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
   const now = Date.now();
   const key = `${guildId}_${userId}`;
 
-  // 🔊 Play sound if it's the OWNER
+  // 🔊 Owner SFX
   if (userId === OWNER_ID) {
     if (!oldChannel && newChannel) playSound(newChannel, "join.mp3");
     else if (oldChannel && !newChannel) playSound(oldChannel, "leave.mp3");
     else if (oldChannel && newChannel && oldChannel.id !== newChannel.id) playSound(newChannel, "join.mp3");
   }
 
-  // 📊 Voice time tracking for everyone
+  // ⏱️ Voice time tracking
   if (!oldChannel && newChannel) {
     voiceJoinMap.set(key, now);
   } else if (oldChannel && !newChannel) {
@@ -139,6 +123,21 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
   }
 });
 
+// 💬 Message Deletion Logging
+client.on("messageDelete", async (message) => {
+  if (!message.guild || !message.author || message.author.bot) return;
+  const guildId = message.guild.id;
+  const log = (await db.get(`snipe_${guildId}`)) || [];
+  log.unshift({
+    content: message.content,
+    author: message.author.tag,
+    authorId: message.author.id,
+    timestamp: Date.now(),
+  });
+  if (log.length > 20) log.pop();
+  await db.set(`snipe_${guildId}`, log);
+});
+
 // 💬 Message Handling
 client.on("messageCreate", async (message) => {
   if (recentMessages.has(message.id)) return;
@@ -151,7 +150,7 @@ client.on("messageCreate", async (message) => {
   const content = message.content.trim();
   const now = Date.now();
 
-  // Anti-spam
+  // Spam filter
   let userData = spamMap.get(userId) || [];
   userData = userData.filter((m) => now - m.timestamp < SPAM_TIME);
   userData.push({ content, id: message.id, timestamp: now });
@@ -186,14 +185,14 @@ client.on("messageCreate", async (message) => {
   if (!command) return;
 
   try {
-    await command.execute(message, args, db, voiceJoinMap);
+    await command.execute(message, args, db, voiceJoinMap, client);
   } catch (err) {
     console.error(err);
     message.reply("❌ Error executing command.");
   }
 });
 
-// 📅 Auto Report
+// ⏱️ Auto Voice Report
 client.once("ready", () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 
